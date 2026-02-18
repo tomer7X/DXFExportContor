@@ -363,6 +363,51 @@ namespace DXFExportContor
                 sourceDb.WblockCloneObjects(
                     ids, destModelSpace.ObjectId, idMap, DuplicateRecordCloning.Replace, false);
 
+                // Compute extents of all cloned entities
+                Extents3d totalExtents = new();
+                bool hasExtents = false;
+                foreach (ObjectId entId in destModelSpace)
+                {
+                    Entity ent = destTr.GetObject(entId, OpenMode.ForRead) as Entity;
+                    if (ent == null) continue;
+                    try
+                    {
+                        if (!hasExtents)
+                        {
+                            totalExtents = ent.GeometricExtents;
+                            hasExtents = true;
+                        }
+                        else
+                        {
+                            totalExtents.AddExtents(ent.GeometricExtents);
+                        }
+                    }
+                    catch { }
+                }
+
+                // Set the active viewport to zoom to extents
+                if (hasExtents)
+                {
+                    ViewportTableRecord vpTr = (ViewportTableRecord)destTr.GetObject(
+                        destDb.CurrentViewportTableRecordId, OpenMode.ForWrite);
+
+                    Point3d center = new(
+                        (totalExtents.MinPoint.X + totalExtents.MaxPoint.X) / 2.0,
+                        (totalExtents.MinPoint.Y + totalExtents.MaxPoint.Y) / 2.0,
+                        0);
+
+                    double width = totalExtents.MaxPoint.X - totalExtents.MinPoint.X;
+                    double height = totalExtents.MaxPoint.Y - totalExtents.MinPoint.Y;
+
+                    // Add a small margin (10%)
+                    width *= 1.1;
+                    height *= 1.1;
+
+                    vpTr.CenterPoint = new Point2d(center.X, center.Y);
+                    vpTr.Height = height;
+                    vpTr.Width = width;
+                }
+
                 destTr.Commit();
             }
 
