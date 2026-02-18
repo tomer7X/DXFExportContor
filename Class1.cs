@@ -171,14 +171,23 @@ namespace DXFExportContor
             Editor ed = doc.Editor;
             Database db = doc.Database;
 
-            // Prompt user to select the grid block
-            PromptEntityOptions peo = new("\nSelect the grid block:");
-            peo.SetRejectMessage("\nMust be a block reference.");
-            peo.AddAllowedClass(typeof(BlockReference), true);
-            PromptEntityResult per = ed.GetEntity(peo);
-            if (per.Status != PromptStatus.OK)
+            // Step 1: Prompt user to select the grid block
+            PromptEntityOptions gridPeo = new("\nSelect the grid block:");
+            gridPeo.SetRejectMessage("\nMust be a block reference.");
+            gridPeo.AddAllowedClass(typeof(BlockReference), true);
+            PromptEntityResult gridPer = ed.GetEntity(gridPeo);
+            if (gridPer.Status != PromptStatus.OK)
             {
                 ed.WriteMessage("\nNo block selected.");
+                return;
+            }
+
+            // Step 2: Prompt user to select an object to determine the contour layer
+            PromptEntityOptions layerPeo = new("\nSelect an object on the contour layer:");
+            PromptEntityResult layerPer = ed.GetEntity(layerPeo);
+            if (layerPer.Status != PromptStatus.OK)
+            {
+                ed.WriteMessage("\nNo object selected.");
                 return;
             }
 
@@ -186,11 +195,22 @@ namespace DXFExportContor
             const double cellHeight = 3000.0;
             const int cols = 10;
 
+            // Determine output folder next to the current DWG
+            string dwgPath = doc.Name;
+            string dwgFolder = System.IO.Path.GetDirectoryName(dwgPath);
+            string dwgName = System.IO.Path.GetFileNameWithoutExtension(dwgPath);
+            string outputFolder = System.IO.Path.Combine(dwgFolder, dwgName + "_DXF");
+
             using Transaction tr = db.TransactionManager.StartTransaction();
+
+            // Get the contour layer name from the selected object
+            Entity layerEnt = (Entity)tr.GetObject(layerPer.ObjectId, OpenMode.ForRead);
+            string contourLayer = layerEnt.Layer;
+            ed.WriteMessage($"\nContour layer: {contourLayer}");
 
             // Get the selected block's bounding box to determine the grid origin
             BlockReference gridBlock =
-                (BlockReference)tr.GetObject(per.ObjectId, OpenMode.ForRead);
+                (BlockReference)tr.GetObject(gridPer.ObjectId, OpenMode.ForRead);
 
             Extents3d blockExtents;
             try
@@ -210,7 +230,7 @@ namespace DXFExportContor
             BlockTableRecord modelSpace = (BlockTableRecord)tr.GetObject(
                 SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
 
-            // First pass: find all arrays in the entire block area and explode them
+            // Explode all arrays in the block area
             int explodedCount = ExplodeArraysInArea(
                 modelSpace, tr, ed,
                 blockExtents.MinPoint.X, blockExtents.MinPoint.Y,
@@ -233,6 +253,32 @@ namespace DXFExportContor
                 else if (ent is MText mText)
                     pNamesTexts.Add((mText.Location, mText.Contents));
             }
+
+            // Collect all entities on the contour layer in model space
+            List<(ObjectId Id, Point3d Position, Extents3d Extents)> contourEntities = [];
+            foreach (ObjectId entId in modelSpace)
+            {
+                Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                if (ent == null) continue;
+                if (!ent.Layer.Equals(contourLayer, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                Extents3d ext;
+                try { ext = ent.GeometricExtents; }
+                catch { continue; }
+
+                // Use the center of the extents as the position for cell matching
+                Point3d center = new(
+                    (ext.MinPoint.X + ext.MaxPoint.X) / 2.0,
+                    (ext.MinPoint.Y + ext.MaxPoint.Y) / 2.0,
+                    0);
+
+                contourEntities.Add((entId, center, ext));
+            }
+
+            // Create the output folder
+            if (!System.IO.Directory.Exists(outputFolder))
+                System.IO.Directory.CreateDirectory(outputFolder);
 
             // Iterate: start at top-left, go left to right (10 cols),
             // then move down one row. Stop when a cell has no P_Names text.
@@ -262,15 +308,74 @@ namespace DXFExportContor
                     {
                         ed.WriteMessage(
                             $"\nCell [row {row + 1}, col {col + 1}]: No text on layer P_Names. Stopping.");
-                        ed.WriteMessage($"\nProcessed {cellCount} cell(s) total.");
+                        ed.WriteMessage($"\nExported {cellCount} DXF file(s) to: {outputFolder}");
                         tr.Commit();
                         return;
                     }
 
+                    // Collect contour entity IDs that fall inside this cell
+                    List<ObjectId> cellEntityIds = [];
+                    foreach (var (id, center, _) in contourEntities)
+                    {
+                        if (center.X >= cellMinX && center.X <= cellMaxX &&
+                            center.Y >= cellMinY && center.Y <= cellMaxY)
+                        {
+                            cellEntityIds.Add(id);
+                        }
+                    }
+
+                    if (cellEntityIds.Count == 0)
+                    {
+                        ed.WriteMessage(
+                            $"\nCell [row {row + 1}, col {col + 1}]: {foundText} - No contour entities, skipping DXF.");
+                        cellCount++;
+                        continue;
+                    }
+
+                    // Export to DXF 2000
+                    string safeName = SanitizeFileName(foundText);
+                    string dxfPath = System.IO.Path.Combine(outputFolder, safeName + ".dxf");
+                    ExportEntitiesToDxf(db, tr, cellEntityIds, dxfPath);
+
                     cellCount++;
-                    ed.WriteMessage($"\nCell [row {row + 1}, col {col + 1}]: {foundText}");
+                    ed.WriteMessage(
+                        $"\nCell [row {row + 1}, col {col + 1}]: {foundText} - Exported {cellEntityIds.Count} entities.");
                 }
             }
+        }
+
+        private static void ExportEntitiesToDxf(
+            Database sourceDb, Transaction sourceTr,
+            List<ObjectId> entityIds, string dxfPath)
+        {
+            using Database destDb = new(true, true);
+            destDb.CloseInput(true);
+
+            // Use WblockCloneObjects for cross-database cloning
+            ObjectIdCollection ids = new([.. entityIds]);
+            IdMapping idMap = new();
+
+            using (Transaction destTr = destDb.TransactionManager.StartTransaction())
+            {
+                BlockTableRecord destModelSpace = (BlockTableRecord)destTr.GetObject(
+                    SymbolUtilityServices.GetBlockModelSpaceId(destDb), OpenMode.ForWrite);
+
+                sourceDb.WblockCloneObjects(
+                    ids, destModelSpace.ObjectId, idMap, DuplicateRecordCloning.Replace, false);
+
+                destTr.Commit();
+            }
+
+            // Save as DXF 2000
+            destDb.DxfOut(dxfPath, 16, DwgVersion.AC1015);
+        }
+
+        private static string SanitizeFileName(string name)
+        {
+            char[] invalid = System.IO.Path.GetInvalidFileNameChars();
+            foreach (char c in invalid)
+                name = name.Replace(c, '_');
+            return name.Trim();
         }
 
         private static int ExplodeArraysInArea(
