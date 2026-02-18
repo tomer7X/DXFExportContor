@@ -207,10 +207,19 @@ namespace DXFExportContor
             double originX = blockExtents.MinPoint.X;
             double originY = blockExtents.MaxPoint.Y;
 
-            // Collect all text entities on layer "P_Names" in model space
             BlockTableRecord modelSpace = (BlockTableRecord)tr.GetObject(
-                SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForRead);
+                SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
 
+            // First pass: find all arrays in the entire block area and explode them
+            int explodedCount = ExplodeArraysInArea(
+                modelSpace, tr, ed,
+                blockExtents.MinPoint.X, blockExtents.MinPoint.Y,
+                blockExtents.MaxPoint.X, blockExtents.MaxPoint.Y);
+
+            if (explodedCount > 0)
+                ed.WriteMessage($"\nExploded {explodedCount} array(s) in the block area.");
+
+            // Collect all text entities on layer "P_Names" in model space
             List<(Point3d Position, string Text)> pNamesTexts = [];
             foreach (ObjectId entId in modelSpace)
             {
@@ -262,6 +271,56 @@ namespace DXFExportContor
                     ed.WriteMessage($"\nCell [row {row + 1}, col {col + 1}]: {foundText}");
                 }
             }
+        }
+
+        private static int ExplodeArraysInArea(
+            BlockTableRecord space, Transaction tr, Editor ed,
+            double minX, double minY, double maxX, double maxY)
+        {
+            int explodedCount = 0;
+
+            // Collect arrays first to avoid modifying collection while iterating
+            List<BlockReference> arraysToExplode = [];
+            foreach (ObjectId entId in space)
+            {
+                Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                if (ent is not BlockReference blkRef) continue;
+                if (!IsAssociativeArray(blkRef, tr)) continue;
+
+                // Check if the array's bounding box overlaps with the area
+                Extents3d ext;
+                try { ext = blkRef.GeometricExtents; }
+                catch { continue; }
+
+                if (ext.MaxPoint.X < minX || ext.MinPoint.X > maxX ||
+                    ext.MaxPoint.Y < minY || ext.MinPoint.Y > maxY)
+                    continue;
+
+                arraysToExplode.Add(blkRef);
+            }
+
+            foreach (BlockReference blkRef in arraysToExplode)
+            {
+                blkRef.UpgradeOpen();
+
+                List<Entity> primitives = [];
+                if (!DeepExplode(blkRef, primitives))
+                {
+                    ed.WriteMessage("\nFailed to explode an array in the block area.");
+                    continue;
+                }
+
+                foreach (Entity primitive in primitives)
+                {
+                    space.AppendEntity(primitive);
+                    tr.AddNewlyCreatedDBObject(primitive, true);
+                }
+
+                blkRef.Erase();
+                explodedCount++;
+            }
+
+            return explodedCount;
         }
     }
 }
