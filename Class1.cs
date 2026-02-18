@@ -6,305 +6,72 @@ using Autodesk.AutoCAD.Geometry;
 
 namespace DXFExportContor
 {
-    public class Class1
+    public class ContourExporter
     {
-        [CommandMethod("HelloWorld")]
-        public void HelloWorld()
-        {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
-            Editor ed = doc.Editor;
-            ed.WriteMessage("\nHello World from DXFExportContor!");
-        }
+        private const double CellWidth = 6000.0;
+        private const double CellHeight = 3000.0;
+        private const int Cols = 10;
 
-        [CommandMethod("ExplodeArrays")]
-        public void ExplodeArrays()
+        [CommandMethod("SeperatePanelsToDXF")]
+        public void SeperatePanelsToDXF()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
             Editor ed = doc.Editor;
             Database db = doc.Database;
 
-            // Prompt the user to select objects
-            PromptSelectionResult selResult = ed.GetSelection();
-            if (selResult.Status != PromptStatus.OK)
-            {
-                ed.WriteMessage("\nNo objects selected.");
-                return;
-            }
+            ObjectId gridBlockId = PromptForGridBlock(ed);
+            if (gridBlockId.IsNull) return;
 
-            SelectionSet selSet = selResult.Value;
-            int explodedCount = 0;
+            ObjectId contourObjectId = PromptForContourObject(ed);
+            if (contourObjectId.IsNull) return;
 
-            using (Transaction tr = db.TransactionManager.StartTransaction())
-            {
-                BlockTableRecord currentSpace =
-                    (BlockTableRecord)tr.GetObject(db.CurrentSpaceId, OpenMode.ForWrite);
-
-                foreach (SelectedObject selObj in selSet)
-                {
-                    if (selObj == null) continue;
-
-                    Entity ent = tr.GetObject(selObj.ObjectId, OpenMode.ForRead) as Entity;
-                    if (ent is not BlockReference blkRef) continue;
-
-                    // Check if this block reference is an associative array
-                    if (!IsAssociativeArray(blkRef, tr)) continue;
-
-                    blkRef.UpgradeOpen();
-
-                    // Recursively explode until we reach primitive geometry
-                    List<Entity> primitives = [];
-                    if (!DeepExplode(blkRef, primitives))
-                    {
-                        ed.WriteMessage("\nFailed to explode an array object.");
-                        continue;
-                    }
-
-                    // Add all primitive entities to the current space
-                    foreach (Entity primitive in primitives)
-                    {
-                        currentSpace.AppendEntity(primitive);
-                        tr.AddNewlyCreatedDBObject(primitive, true);
-                    }
-
-                    // Remove the original array block reference
-                    blkRef.Erase();
-                    explodedCount++;
-                }
-
-                tr.Commit();
-            }
-
-            ed.WriteMessage($"\nExploded {explodedCount} array(s).");
-        }
-
-        private static bool DeepExplode(Entity entity, List<Entity> results)
-        {
-            DBObjectCollection explodedObjects = new DBObjectCollection();
-            try
-            {
-                entity.Explode(explodedObjects);
-            }
-            catch (Autodesk.AutoCAD.Runtime.Exception)
-            {
-                return false;
-            }
-
-            foreach (DBObject obj in explodedObjects)
-            {
-                if (obj is BlockReference nestedBlkRef)
-                {
-                    // Keep exploding nested block references
-                    if (!DeepExplode(nestedBlkRef, results))
-                    {
-                        // If it can't be exploded further, keep it as-is
-                        results.Add(nestedBlkRef);
-                    }
-                }
-                else if (obj is Entity ent)
-                {
-                    results.Add(ent);
-                }
-            }
-
-            return true;
-        }
-
-
-        private static bool IsAssociativeArray(BlockReference blkRef, Transaction tr)
-        {
-            // Method 1: Check if the block reference itself has an extension
-            // dictionary with ACAD_ASSOCNETWORK
-            if (!blkRef.ExtensionDictionary.IsNull)
-            {
-                DBDictionary extDict =
-                    (DBDictionary)tr.GetObject(blkRef.ExtensionDictionary, OpenMode.ForRead);
-
-                if (extDict.Contains("ACAD_ASSOCNETWORK"))
-                    return true;
-            }
-
-            // Method 2: Check the block definition (BlockTableRecord) for
-            // an extension dictionary with ACAD_ASSOCNETWORK.
-            // AutoCAD stores the associative network on the BTR, not the reference.
-            BlockTableRecord btr =
-                (BlockTableRecord)tr.GetObject(blkRef.BlockTableRecord, OpenMode.ForRead);
-
-            if (!btr.ExtensionDictionary.IsNull)
-            {
-                DBDictionary btrExtDict =
-                    (DBDictionary)tr.GetObject(btr.ExtensionDictionary, OpenMode.ForRead);
-
-                if (btrExtDict.Contains("ACAD_ASSOCNETWORK"))
-                    return true;
-            }
-
-            // Method 3: Check persistent reactors on the block reference.
-            // Associative arrays attach AssocDependency objects as reactors.
-            ObjectIdCollection reactorIds = blkRef.GetPersistentReactorIds();
-            if (reactorIds != null)
-            {
-                foreach (ObjectId reactorId in reactorIds)
-                {
-                    if (!reactorId.IsValid || reactorId.IsErased) continue;
-
-                    DBObject reactor = tr.GetObject(reactorId, OpenMode.ForRead);
-                    string rxClassName = reactor.GetRXClass().Name;
-
-                    if (rxClassName.Contains("AssocDependency") ||
-                        rxClassName.Contains("AssocArray"))
-                        return true;
-                }
-            }
-
-            // Method 4: Check if the block name follows the anonymous array
-            // naming pattern (e.g., "*A1", "*A2", etc.)
-            if (btr.Name.StartsWith("*A", System.StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            return false;
-        }
-
-        [CommandMethod("Tomer")]
-        public void Tomer()
-        {
-            Document doc = Application.DocumentManager.MdiActiveDocument;
-            Editor ed = doc.Editor;
-            Database db = doc.Database;
-
-            // Step 1: Prompt user to select the grid block
-            PromptEntityOptions gridPeo = new("\nSelect the grid block:");
-            gridPeo.SetRejectMessage("\nMust be a block reference.");
-            gridPeo.AddAllowedClass(typeof(BlockReference), true);
-            PromptEntityResult gridPer = ed.GetEntity(gridPeo);
-            if (gridPer.Status != PromptStatus.OK)
-            {
-                ed.WriteMessage("\nNo block selected.");
-                return;
-            }
-
-            // Step 2: Prompt user to select an object to determine the contour layer
-            PromptEntityOptions layerPeo = new("\nSelect an object on the contour layer:");
-            PromptEntityResult layerPer = ed.GetEntity(layerPeo);
-            if (layerPer.Status != PromptStatus.OK)
-            {
-                ed.WriteMessage("\nNo object selected.");
-                return;
-            }
-
-            const double cellWidth = 6000.0;
-            const double cellHeight = 3000.0;
-            const int cols = 10;
-
-            // Determine output folder next to the current DWG
-            string dwgPath = doc.Name;
-            string dwgFolder = System.IO.Path.GetDirectoryName(dwgPath);
-            string dwgName = System.IO.Path.GetFileNameWithoutExtension(dwgPath);
+            string dwgFolder = System.IO.Path.GetDirectoryName(doc.Name);
+            string dwgName = System.IO.Path.GetFileNameWithoutExtension(doc.Name);
             string outputFolder = System.IO.Path.Combine(dwgFolder, dwgName + "_DXF");
 
             using Transaction tr = db.TransactionManager.StartTransaction();
 
-            // Get the contour layer name from the selected object
-            Entity layerEnt = (Entity)tr.GetObject(layerPer.ObjectId, OpenMode.ForRead);
-            string contourLayer = layerEnt.Layer;
+            string contourLayer = ((Entity)tr.GetObject(contourObjectId, OpenMode.ForRead)).Layer;
             ed.WriteMessage($"\nContour layer: {contourLayer}");
 
-            // Get the selected block's bounding box to determine the grid origin
-            BlockReference gridBlock =
-                (BlockReference)tr.GetObject(gridPer.ObjectId, OpenMode.ForRead);
-
-            Extents3d blockExtents;
-            try
-            {
-                blockExtents = gridBlock.GeometricExtents;
-            }
-            catch
+            Extents3d blockExtents = GetBlockExtents(tr, gridBlockId);
+            if (blockExtents.MinPoint == blockExtents.MaxPoint)
             {
                 ed.WriteMessage("\nCould not get block extents.");
                 return;
             }
 
-            // Grid origin is the top-left corner of the block
             double originX = blockExtents.MinPoint.X;
             double originY = blockExtents.MaxPoint.Y;
 
             BlockTableRecord modelSpace = (BlockTableRecord)tr.GetObject(
                 SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
 
-            // Explode all arrays in the block area
-            int explodedCount = ExplodeArraysInArea(
-                modelSpace, tr, ed,
+            int explodedCount = ExplodeArraysInArea(modelSpace, tr,
                 blockExtents.MinPoint.X, blockExtents.MinPoint.Y,
                 blockExtents.MaxPoint.X, blockExtents.MaxPoint.Y);
 
             if (explodedCount > 0)
                 ed.WriteMessage($"\nExploded {explodedCount} array(s) in the block area.");
 
-            // Collect all text entities on layer "P_Names" in model space
-            List<(Point3d Position, string Text)> pNamesTexts = [];
-            foreach (ObjectId entId in modelSpace)
-            {
-                Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
-                if (ent == null) continue;
-                if (!ent.Layer.Equals("P_Names", StringComparison.OrdinalIgnoreCase))
-                    continue;
+            var pNamesTexts = CollectTextOnLayer(modelSpace, tr, "P_Names");
+            var contourEntities = CollectEntitiesOnLayer(modelSpace, tr, contourLayer);
 
-                if (ent is DBText dbText)
-                    pNamesTexts.Add((dbText.Position, dbText.TextString));
-                else if (ent is MText mText)
-                    pNamesTexts.Add((mText.Location, mText.Contents));
-            }
-
-            // Collect all entities on the contour layer in model space
-            List<(ObjectId Id, Point3d Position, Extents3d Extents)> contourEntities = [];
-            foreach (ObjectId entId in modelSpace)
-            {
-                Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
-                if (ent == null) continue;
-                if (!ent.Layer.Equals(contourLayer, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                Extents3d ext;
-                try { ext = ent.GeometricExtents; }
-                catch { continue; }
-
-                // Use the center of the extents as the position for cell matching
-                Point3d center = new(
-                    (ext.MinPoint.X + ext.MaxPoint.X) / 2.0,
-                    (ext.MinPoint.Y + ext.MaxPoint.Y) / 2.0,
-                    0);
-
-                contourEntities.Add((entId, center, ext));
-            }
-
-            // Create the output folder
             if (!System.IO.Directory.Exists(outputFolder))
                 System.IO.Directory.CreateDirectory(outputFolder);
 
-            // Iterate: start at top-left, go left to right (10 cols),
-            // then move down one row. Stop when a cell has no P_Names text.
             int cellCount = 0;
             for (int row = 0; ; row++)
             {
-                for (int col = 0; col < cols; col++)
+                for (int col = 0; col < Cols; col++)
                 {
-                    double cellMinX = originX + col * cellWidth;
-                    double cellMaxY = originY - row * cellHeight;
-                    double cellMaxX = cellMinX + cellWidth;
-                    double cellMinY = cellMaxY - cellHeight;
+                    double cellMinX = originX + col * CellWidth;
+                    double cellMaxY = originY - row * CellHeight;
+                    double cellMaxX = cellMinX + CellWidth;
+                    double cellMinY = cellMaxY - CellHeight;
 
-                    // Find text whose position falls inside this cell
-                    string foundText = null;
-                    foreach (var (pos, text) in pNamesTexts)
-                    {
-                        if (pos.X >= cellMinX && pos.X <= cellMaxX &&
-                            pos.Y >= cellMinY && pos.Y <= cellMaxY)
-                        {
-                            foundText = text;
-                            break;
-                        }
-                    }
-
-                    if (foundText == null)
+                    string name = FindTextInCell(pNamesTexts, cellMinX, cellMinY, cellMaxX, cellMaxY);
+                    if (name == null)
                     {
                         ed.WriteMessage(
                             $"\nCell [row {row + 1}, col {col + 1}]: No text on layer P_Names. Stopping.");
@@ -313,45 +80,153 @@ namespace DXFExportContor
                         return;
                     }
 
-                    // Collect contour entity IDs that fall inside this cell
-                    List<ObjectId> cellEntityIds = [];
-                    foreach (var (id, center, _) in contourEntities)
-                    {
-                        if (center.X >= cellMinX && center.X <= cellMaxX &&
-                            center.Y >= cellMinY && center.Y <= cellMaxY)
-                        {
-                            cellEntityIds.Add(id);
-                        }
-                    }
+                    List<ObjectId> cellEntityIds = FindEntitiesInCell(
+                        contourEntities, cellMinX, cellMinY, cellMaxX, cellMaxY);
 
                     if (cellEntityIds.Count == 0)
                     {
                         ed.WriteMessage(
-                            $"\nCell [row {row + 1}, col {col + 1}]: {foundText} - No contour entities, skipping DXF.");
+                            $"\nCell [row {row + 1}, col {col + 1}]: {name} - No contour entities, skipping.");
                         cellCount++;
                         continue;
                     }
 
-                    // Export to DXF 2000
-                    string safeName = SanitizeFileName(foundText);
-                    string dxfPath = System.IO.Path.Combine(outputFolder, safeName + ".dxf");
-                    ExportEntitiesToDxf(db, tr, cellEntityIds, dxfPath);
+                    string dxfPath = System.IO.Path.Combine(outputFolder, SanitizeFileName(name) + ".dxf");
+                    ExportEntitiesToDxf(db, cellEntityIds, dxfPath);
 
                     cellCount++;
                     ed.WriteMessage(
-                        $"\nCell [row {row + 1}, col {col + 1}]: {foundText} - Exported {cellEntityIds.Count} entities.");
+                        $"\nCell [row {row + 1}, col {col + 1}]: {name} - Exported {cellEntityIds.Count} entities.");
                 }
             }
         }
 
+        #region User Prompts
+
+        private static ObjectId PromptForGridBlock(Editor ed)
+        {
+            PromptEntityOptions peo = new("\nSelect the grid block:");
+            peo.SetRejectMessage("\nMust be a block reference.");
+            peo.AddAllowedClass(typeof(BlockReference), true);
+            PromptEntityResult per = ed.GetEntity(peo);
+
+            if (per.Status != PromptStatus.OK)
+            {
+                ed.WriteMessage("\nNo block selected.");
+                return ObjectId.Null;
+            }
+            return per.ObjectId;
+        }
+
+        private static ObjectId PromptForContourObject(Editor ed)
+        {
+            PromptEntityOptions peo = new("\nSelect an object on the contour layer:");
+            PromptEntityResult per = ed.GetEntity(peo);
+
+            if (per.Status != PromptStatus.OK)
+            {
+                ed.WriteMessage("\nNo object selected.");
+                return ObjectId.Null;
+            }
+            return per.ObjectId;
+        }
+
+        #endregion
+
+        #region Data Collection
+
+        private static Extents3d GetBlockExtents(Transaction tr, ObjectId blockId)
+        {
+            BlockReference gridBlock = (BlockReference)tr.GetObject(blockId, OpenMode.ForRead);
+            try { return gridBlock.GeometricExtents; }
+            catch { return new Extents3d(); }
+        }
+
+        private static List<(Point3d Position, string Text)> CollectTextOnLayer(
+            BlockTableRecord modelSpace, Transaction tr, string layerName)
+        {
+            List<(Point3d, string)> results = [];
+            foreach (ObjectId entId in modelSpace)
+            {
+                Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                if (ent == null) continue;
+                if (!ent.Layer.Equals(layerName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (ent is DBText dbText)
+                    results.Add((dbText.Position, dbText.TextString));
+                else if (ent is MText mText)
+                    results.Add((mText.Location, mText.Contents));
+            }
+            return results;
+        }
+
+        private static List<(ObjectId Id, Point3d Center)> CollectEntitiesOnLayer(
+            BlockTableRecord modelSpace, Transaction tr, string layerName)
+        {
+            List<(ObjectId, Point3d)> results = [];
+            foreach (ObjectId entId in modelSpace)
+            {
+                Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                if (ent == null) continue;
+                if (!ent.Layer.Equals(layerName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                Extents3d ext;
+                try { ext = ent.GeometricExtents; }
+                catch { continue; }
+
+                Point3d center = new(
+                    (ext.MinPoint.X + ext.MaxPoint.X) / 2.0,
+                    (ext.MinPoint.Y + ext.MaxPoint.Y) / 2.0,
+                    0);
+
+                results.Add((entId, center));
+            }
+            return results;
+        }
+
+        #endregion
+
+        #region Cell Lookup
+
+        private static string FindTextInCell(
+            List<(Point3d Position, string Text)> texts,
+            double minX, double minY, double maxX, double maxY)
+        {
+            foreach (var (pos, text) in texts)
+            {
+                if (pos.X >= minX && pos.X <= maxX &&
+                    pos.Y >= minY && pos.Y <= maxY)
+                    return text;
+            }
+            return null;
+        }
+
+        private static List<ObjectId> FindEntitiesInCell(
+            List<(ObjectId Id, Point3d Center)> entities,
+            double minX, double minY, double maxX, double maxY)
+        {
+            List<ObjectId> result = [];
+            foreach (var (id, center) in entities)
+            {
+                if (center.X >= minX && center.X <= maxX &&
+                    center.Y >= minY && center.Y <= maxY)
+                    result.Add(id);
+            }
+            return result;
+        }
+
+        #endregion
+
+        #region DXF Export
+
         private static void ExportEntitiesToDxf(
-            Database sourceDb, Transaction sourceTr,
-            List<ObjectId> entityIds, string dxfPath)
+            Database sourceDb, List<ObjectId> entityIds, string dxfPath)
         {
             using Database destDb = new(true, true);
             destDb.CloseInput(true);
 
-            // Use WblockCloneObjects for cross-database cloning
             ObjectIdCollection ids = new([.. entityIds]);
             IdMapping idMap = new();
 
@@ -363,73 +238,61 @@ namespace DXFExportContor
                 sourceDb.WblockCloneObjects(
                     ids, destModelSpace.ObjectId, idMap, DuplicateRecordCloning.Replace, false);
 
-                // Compute extents of all cloned entities
-                Extents3d totalExtents = new();
-                bool hasExtents = false;
-                foreach (ObjectId entId in destModelSpace)
-                {
-                    Entity ent = destTr.GetObject(entId, OpenMode.ForRead) as Entity;
-                    if (ent == null) continue;
-                    try
-                    {
-                        if (!hasExtents)
-                        {
-                            totalExtents = ent.GeometricExtents;
-                            hasExtents = true;
-                        }
-                        else
-                        {
-                            totalExtents.AddExtents(ent.GeometricExtents);
-                        }
-                    }
-                    catch { }
-                }
-
-                // Set the active viewport to zoom to extents
-                if (hasExtents)
-                {
-                    ViewportTableRecord vpTr = (ViewportTableRecord)destTr.GetObject(
-                        destDb.CurrentViewportTableRecordId, OpenMode.ForWrite);
-
-                    Point3d center = new(
-                        (totalExtents.MinPoint.X + totalExtents.MaxPoint.X) / 2.0,
-                        (totalExtents.MinPoint.Y + totalExtents.MaxPoint.Y) / 2.0,
-                        0);
-
-                    double width = totalExtents.MaxPoint.X - totalExtents.MinPoint.X;
-                    double height = totalExtents.MaxPoint.Y - totalExtents.MinPoint.Y;
-
-                    // Add a small margin (10%)
-                    width *= 1.1;
-                    height *= 1.1;
-
-                    vpTr.CenterPoint = new Point2d(center.X, center.Y);
-                    vpTr.Height = height;
-                    vpTr.Width = width;
-                }
-
+                ZoomExtents(destDb, destTr, destModelSpace);
                 destTr.Commit();
             }
 
-            // Save as DXF 2000
             destDb.DxfOut(dxfPath, 16, DwgVersion.AC1015);
         }
 
-        private static string SanitizeFileName(string name)
+        private static void ZoomExtents(
+            Database db, Transaction tr, BlockTableRecord modelSpace)
         {
-            char[] invalid = System.IO.Path.GetInvalidFileNameChars();
-            foreach (char c in invalid)
-                name = name.Replace(c, '_');
-            return name.Trim();
+            Extents3d totalExtents = new();
+            bool hasExtents = false;
+
+            foreach (ObjectId entId in modelSpace)
+            {
+                Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
+                if (ent == null) continue;
+                try
+                {
+                    if (!hasExtents)
+                    {
+                        totalExtents = ent.GeometricExtents;
+                        hasExtents = true;
+                    }
+                    else
+                    {
+                        totalExtents.AddExtents(ent.GeometricExtents);
+                    }
+                }
+                catch { }
+            }
+
+            if (!hasExtents) return;
+
+            ViewportTableRecord vp = (ViewportTableRecord)tr.GetObject(
+                db.CurrentViewportTableRecordId, OpenMode.ForWrite);
+
+            double centerX = (totalExtents.MinPoint.X + totalExtents.MaxPoint.X) / 2.0;
+            double centerY = (totalExtents.MinPoint.Y + totalExtents.MaxPoint.Y) / 2.0;
+            double width = (totalExtents.MaxPoint.X - totalExtents.MinPoint.X) * 1.1;
+            double height = (totalExtents.MaxPoint.Y - totalExtents.MinPoint.Y) * 1.1;
+
+            vp.CenterPoint = new Point2d(centerX, centerY);
+            vp.Height = height;
+            vp.Width = width;
         }
 
+        #endregion
+
+        #region Array Explode
+
         private static int ExplodeArraysInArea(
-            BlockTableRecord space, Transaction tr, Editor ed,
+            BlockTableRecord space, Transaction tr,
             double minX, double minY, double maxX, double maxY)
         {
-            int explodedCount = 0;
-
-            // Collect arrays first to avoid modifying collection while iterating
             List<BlockReference> arraysToExplode = [];
             foreach (ObjectId entId in space)
             {
@@ -437,7 +300,6 @@ namespace DXFExportContor
                 if (ent is not BlockReference blkRef) continue;
                 if (!IsAssociativeArray(blkRef, tr)) continue;
 
-                // Check if the array's bounding box overlaps with the area
                 Extents3d ext;
                 try { ext = blkRef.GeometricExtents; }
                 catch { continue; }
@@ -449,16 +311,14 @@ namespace DXFExportContor
                 arraysToExplode.Add(blkRef);
             }
 
+            int count = 0;
             foreach (BlockReference blkRef in arraysToExplode)
             {
                 blkRef.UpgradeOpen();
 
                 List<Entity> primitives = [];
                 if (!DeepExplode(blkRef, primitives))
-                {
-                    ed.WriteMessage("\nFailed to explode an array in the block area.");
                     continue;
-                }
 
                 foreach (Entity primitive in primitives)
                 {
@@ -467,10 +327,83 @@ namespace DXFExportContor
                 }
 
                 blkRef.Erase();
-                explodedCount++;
+                count++;
+            }
+            return count;
+        }
+
+        private static bool DeepExplode(Entity entity, List<Entity> results)
+        {
+            DBObjectCollection exploded = new();
+            try { entity.Explode(exploded); }
+            catch (Autodesk.AutoCAD.Runtime.Exception) { return false; }
+
+            foreach (DBObject obj in exploded)
+            {
+                if (obj is BlockReference nested)
+                {
+                    if (!DeepExplode(nested, results))
+                        results.Add(nested);
+                }
+                else if (obj is Entity ent)
+                {
+                    results.Add(ent);
+                }
+            }
+            return true;
+        }
+
+        private static bool IsAssociativeArray(BlockReference blkRef, Transaction tr)
+        {
+            if (!blkRef.ExtensionDictionary.IsNull)
+            {
+                DBDictionary extDict =
+                    (DBDictionary)tr.GetObject(blkRef.ExtensionDictionary, OpenMode.ForRead);
+                if (extDict.Contains("ACAD_ASSOCNETWORK"))
+                    return true;
             }
 
-            return explodedCount;
+            BlockTableRecord btr =
+                (BlockTableRecord)tr.GetObject(blkRef.BlockTableRecord, OpenMode.ForRead);
+
+            if (!btr.ExtensionDictionary.IsNull)
+            {
+                DBDictionary btrExtDict =
+                    (DBDictionary)tr.GetObject(btr.ExtensionDictionary, OpenMode.ForRead);
+                if (btrExtDict.Contains("ACAD_ASSOCNETWORK"))
+                    return true;
+            }
+
+            ObjectIdCollection reactorIds = blkRef.GetPersistentReactorIds();
+            if (reactorIds != null)
+            {
+                foreach (ObjectId reactorId in reactorIds)
+                {
+                    if (!reactorId.IsValid || reactorId.IsErased) continue;
+                    string rxName = tr.GetObject(reactorId, OpenMode.ForRead).GetRXClass().Name;
+                    if (rxName.Contains("AssocDependency") || rxName.Contains("AssocArray"))
+                        return true;
+                }
+            }
+
+            if (btr.Name.StartsWith("*A", System.StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return false;
         }
+
+        #endregion
+
+        #region Utilities
+
+        private static string SanitizeFileName(string name)
+        {
+            char[] invalid = System.IO.Path.GetInvalidFileNameChars();
+            foreach (char c in invalid)
+                name = name.Replace(c, '_');
+            return name.Trim();
+        }
+
+        #endregion
     }
 }
