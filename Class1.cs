@@ -8,8 +8,8 @@ namespace DXFExportContor
 {
     public class ContourExporter
     {
-        private const double CellWidth = 6000.0;
-        private const double CellHeight = 3000.0;
+        private const double CellWidth = 10000.0;
+        private const double CellHeight = 5000.0;
         private const int Cols = 10;
 
         [CommandMethod("SeperatePanelsToDXF")]
