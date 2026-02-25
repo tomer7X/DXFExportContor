@@ -12,7 +12,7 @@ namespace DXFExportContor
         private const double CellHeight = 5000.0;
         private const int Cols = 10;
 
-        [CommandMethod("SeperatePanelsToDXF")]
+        [CommandMethod("NHdxfCreator")]
         public void SeperatePanelsToDXF()
         {
             Document doc = Application.DocumentManager.MdiActiveDocument;
