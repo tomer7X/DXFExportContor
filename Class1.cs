@@ -8,8 +8,6 @@ namespace DXFExportContor
 {
     public class ContourExporter
     {
-        private const double CellWidth = 10000.0;
-        private const double CellHeight = 5000.0;
         private const int Cols = 10;
 
         [CommandMethod("NHdxfCreator")]
@@ -44,6 +42,9 @@ namespace DXFExportContor
             double originX = blockExtents.MinPoint.X;
             double originY = blockExtents.MaxPoint.Y;
 
+            double cellWidth = blockExtents.MaxPoint.X - blockExtents.MinPoint.X;
+            double cellHeight = cellWidth / 2.0;
+
             BlockTableRecord modelSpace = (BlockTableRecord)tr.GetObject(
                 SymbolUtilityServices.GetBlockModelSpaceId(db), OpenMode.ForWrite);
 
@@ -65,10 +66,10 @@ namespace DXFExportContor
             {
                 for (int col = 0; col < Cols; col++)
                 {
-                    double cellMinX = originX + col * CellWidth;
-                    double cellMaxY = originY - row * CellHeight;
-                    double cellMaxX = cellMinX + CellWidth;
-                    double cellMinY = cellMaxY - CellHeight;
+                    double cellMinX = originX + col * cellWidth;
+                    double cellMaxY = originY - row * cellHeight;
+                    double cellMaxX = cellMinX + cellWidth;
+                    double cellMinY = cellMaxY - cellHeight;
 
                     string name = FindTextInCell(pNamesTexts, cellMinX, cellMinY, cellMaxX, cellMaxY);
                     if (name == null)
