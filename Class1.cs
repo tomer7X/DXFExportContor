@@ -8,7 +8,7 @@ namespace DXFExportContor
 {
     public class ContourExporter
     {
-        private const int Cols = 10;
+        private const double Cols = 10.0;
 
         [CommandMethod("NHdxfCreator")]
         public void SeperatePanelsToDXF()
@@ -20,8 +20,8 @@ namespace DXFExportContor
             ObjectId gridBlockId = PromptForGridBlock(ed);
             if (gridBlockId.IsNull) return;
 
-            ObjectId contourObjectId = PromptForContourObject(ed);
-            if (contourObjectId.IsNull) return;
+            List<string> contourLayers = PromptForContourLayers(ed, db);
+            if (contourLayers.Count == 0) return;
 
             string dwgFolder = System.IO.Path.GetDirectoryName(doc.Name);
             string dwgName = System.IO.Path.GetFileNameWithoutExtension(doc.Name);
@@ -29,8 +29,7 @@ namespace DXFExportContor
 
             using Transaction tr = db.TransactionManager.StartTransaction();
 
-            string contourLayer = ((Entity)tr.GetObject(contourObjectId, OpenMode.ForRead)).Layer;
-            ed.WriteMessage($"\nContour layer: {contourLayer}");
+            ed.WriteMessage($"\nexported layers: {string.Join(", ", contourLayers)}");
 
             Extents3d blockExtents = GetBlockExtents(tr, gridBlockId);
             if (blockExtents.MinPoint == blockExtents.MaxPoint)
@@ -42,7 +41,7 @@ namespace DXFExportContor
             double originX = blockExtents.MinPoint.X;
             double originY = blockExtents.MaxPoint.Y;
 
-            double cellWidth = blockExtents.MaxPoint.X - blockExtents.MinPoint.X;
+            double cellWidth = (blockExtents.MaxPoint.X - blockExtents.MinPoint.X) / Cols;
             double cellHeight = cellWidth / 2.0;
 
             BlockTableRecord modelSpace = (BlockTableRecord)tr.GetObject(
@@ -56,7 +55,7 @@ namespace DXFExportContor
                 ed.WriteMessage($"\nExploded {explodedCount} array(s) in the block area.");
 
             var pNamesTexts = CollectTextOnLayer(modelSpace, tr, "P_Names");
-            var contourEntities = CollectEntitiesOnLayer(modelSpace, tr, contourLayer);
+            var contourEntities = CollectEntitiesOnLayers(modelSpace, tr, contourLayers);
 
             if (!System.IO.Directory.Exists(outputFolder))
                 System.IO.Directory.CreateDirectory(outputFolder);
@@ -87,7 +86,7 @@ namespace DXFExportContor
                     if (cellEntityIds.Count == 0)
                     {
                         ed.WriteMessage(
-                            $"\nCell [row {row + 1}, col {col + 1}]: {name} - No contour entities, skipping.");
+                            $"\nCell [row {row + 1}, col {col + 1}]: {name} - No selected layers entities, skipping.");
                         cellCount++;
                         continue;
                     }
@@ -119,17 +118,31 @@ namespace DXFExportContor
             return per.ObjectId;
         }
 
-        private static ObjectId PromptForContourObject(Editor ed)
+        private static List<string> PromptForContourLayers(Editor ed, Database db)
         {
-            PromptEntityOptions peo = new("\nSelect an object on the contour layer:");
-            PromptEntityResult per = ed.GetEntity(peo);
+            PromptSelectionOptions pso = new();
+            pso.MessageForAdding = "\nSelect objects of the exported layers:";
+            pso.MessageForRemoval = "\nRemove objects:";
+            PromptSelectionResult psr = ed.GetSelection(pso);
 
-            if (per.Status != PromptStatus.OK)
+            if (psr.Status != PromptStatus.OK)
             {
-                ed.WriteMessage("\nNo object selected.");
-                return ObjectId.Null;
+                ed.WriteMessage("\nNo objects selected.");
+                return [];
             }
-            return per.ObjectId;
+
+            HashSet<string> layers = [];
+            using Transaction tr = db.TransactionManager.StartTransaction();
+            foreach (SelectedObject selObj in psr.Value)
+            {
+                if (selObj == null) continue;
+                Entity ent = tr.GetObject(selObj.ObjectId, OpenMode.ForRead) as Entity;
+                if (ent != null)
+                    layers.Add(ent.Layer);
+            }
+            tr.Commit();
+
+            return [.. layers];
         }
 
         #endregion
@@ -162,16 +175,16 @@ namespace DXFExportContor
             return results;
         }
 
-        private static List<(ObjectId Id, Point3d Center)> CollectEntitiesOnLayer(
-            BlockTableRecord modelSpace, Transaction tr, string layerName)
+        private static List<(ObjectId Id, Point3d Center)> CollectEntitiesOnLayers(
+            BlockTableRecord modelSpace, Transaction tr, List<string> layerNames)
         {
+            HashSet<string> layerSet = new(layerNames, StringComparer.OrdinalIgnoreCase);
             List<(ObjectId, Point3d)> results = [];
             foreach (ObjectId entId in modelSpace)
             {
                 Entity ent = tr.GetObject(entId, OpenMode.ForRead) as Entity;
                 if (ent == null) continue;
-                if (!ent.Layer.Equals(layerName, StringComparison.OrdinalIgnoreCase))
-                    continue;
+                if (!layerSet.Contains(ent.Layer)) continue;
 
                 Extents3d ext;
                 try { ext = ent.GeometricExtents; }
